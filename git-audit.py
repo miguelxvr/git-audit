@@ -3,25 +3,34 @@
 A fast, dependency-free extractor of per-developer indicators from a Git repository.
 
 Usage examples:
-  python3 git-audit.py --all --no-merges --since 2024-01-01 > indicators.csv
+  python3 git-audit.py --no-merges --since 2024-01-01 > indicators.csv
   python3 git-audit.py --branch main --exclude 'vendor/' --exclude 'dist/'
+  python3 git-audit.py --repo https://github.com/user/repo.git > indicators.csv
 
 Key options:
-  --all / --branch <name>      : choose refs (default: current HEAD)
+  --repo URL                   : GitHub/GitLab repository URL (clones temporarily)
+  --branch <name>              : analyze specific branch (default: all refs)
   --no-merges                  : ignore merge commits for most metrics
   --since / --until YYYY-MM-DD : time window filter
   --exclude PATHSPEC           : repeatable; excludes subtree(s); supports pathspecs
 
 Metrics (per author/email):
-  commits_non_merge, merge_commits, lines_added, lines_deleted, net_lines,
-  files_changed, unique_files_touched, avg_commit_size_lines, active_days,
-  weekend_commit_pct, first_commit_date, last_commit_date
+  Base metrics: commits_non_merge, merge_commits, total_commits, lines_added,
+    lines_deleted, total_lines_changed, files_changed, unique_files_touched
+  Calculated indicators: avg_commit_size_lines, commit_frequency, churn_ratio,
+    files_per_commit, active_span_days, active_days
+  Relative metrics: commit_pct, lines_changed_pct, files_touched_pct
+  Dates: first_commit_date, last_commit_date
 """
 
 import argparse
 import csv
+import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -31,23 +40,28 @@ from typing import Dict, List, Optional, Set, Tuple
 
 GIT_LOG_FORMAT_HEADER = "%H%x09%an%x09%ae%x09%ad"
 GIT_DATE_FORMAT_SHORT = "--date=short"
-GIT_DATE_FORMAT_WEEKDAY = "--date=format:%Y-%m-%d %w"
-WEEKEND_DAYS = {"0", "6"}  # Sunday=0, Saturday=6
 
 OUTPUT_FIELDNAMES = [
     "author",
     "commits_non_merge",
     "merge_commits",
+    "total_commits",
     "lines_added",
     "lines_deleted",
-    "net_lines",
+    "total_lines_changed",
     "files_changed",
     "unique_files_touched",
     "avg_commit_size_lines",
     "active_days",
-    "weekend_commit_pct",
+    "commit_frequency",
+    "churn_ratio",
+    "files_per_commit",
+    "active_span_days",
     "first_commit_date",
     "last_commit_date",
+    "commit_pct",
+    "lines_changed_pct",
+    "files_touched_pct",
 ]
 
 
@@ -66,15 +80,9 @@ class AuthorStats:
     lines_deleted: int = 0
     files_changed: int = 0
     active_days: Set[str] = field(default_factory=set)
-    weekend_commits: int = 0
     unique_files: Set[str] = field(default_factory=set)
     first_commit_date: str = ""
     last_commit_date: str = ""
-
-    @property
-    def net_lines(self) -> int:
-        """Calculate net lines (added - deleted)."""
-        return self.lines_added - self.lines_deleted
 
     @property
     def active_days_count(self) -> int:
@@ -82,37 +90,100 @@ class AuthorStats:
         return len(self.active_days)
 
     @property
+    def total_commits(self) -> int:
+        """Total commits including merges."""
+        return self.commits_non_merge + self.merge_commits
+
+    @property
+    def total_lines_changed(self) -> int:
+        """Total lines changed (additions + deletions)."""
+        return self.lines_added + self.lines_deleted
+
+    @property
     def avg_commit_size_lines(self) -> float:
         """Average lines changed per commit."""
         if self.commits_non_merge == 0:
             return 0.0
-        total_lines = self.lines_added + self.lines_deleted
-        return round(total_lines / self.commits_non_merge, 2)
+        return round(self.total_lines_changed / self.commits_non_merge, 2)
 
     @property
-    def weekend_commit_pct(self) -> float:
-        """Percentage of commits made on weekends."""
+    def commit_frequency(self) -> float:
+        """Commits per active day."""
+        if self.active_days_count == 0:
+            return 0.0
+        return round(self.commits_non_merge / self.active_days_count, 2)
+
+    @property
+    def churn_ratio(self) -> float:
+        """Code churn ratio (deletions / additions). Lower = more new code."""
+        if self.lines_added == 0:
+            return 0.0
+        return round(self.lines_deleted / self.lines_added, 2)
+
+    @property
+    def files_per_commit(self) -> float:
+        """Average files changed per commit."""
         if self.commits_non_merge == 0:
             return 0.0
-        return round((self.weekend_commits / self.commits_non_merge) * 100, 1)
+        return round(self.files_changed / self.commits_non_merge, 2)
 
-    def to_dict(self, author_email: str) -> Dict:
-        """Convert to dictionary for output."""
-        return {
+    @property
+    def active_span_days(self) -> int:
+        """Number of days between first and last commit."""
+        if not self.first_commit_date or not self.last_commit_date:
+            return 0
+        try:
+            from datetime import datetime
+
+            first = datetime.strptime(self.first_commit_date, "%Y-%m-%d")
+            last = datetime.strptime(self.last_commit_date, "%Y-%m-%d")
+            return (last - first).days
+        except:
+            return 0
+
+    def to_dict(
+        self, author_email: str, relative_metrics: Optional[Dict] = None
+    ) -> Dict:
+        """
+        Convert to dictionary for output.
+
+        Args:
+            author_email: Author email address
+            relative_metrics: Optional dict with relative percentages
+        """
+        result = {
             "author": author_email,
             "commits_non_merge": self.commits_non_merge,
             "merge_commits": self.merge_commits,
+            "total_commits": self.total_commits,
             "lines_added": self.lines_added,
             "lines_deleted": self.lines_deleted,
-            "net_lines": self.net_lines,
+            "total_lines_changed": self.total_lines_changed,
             "files_changed": self.files_changed,
             "unique_files_touched": len(self.unique_files),
             "avg_commit_size_lines": self.avg_commit_size_lines,
             "active_days": self.active_days_count,
-            "weekend_commit_pct": self.weekend_commit_pct,
+            "commit_frequency": self.commit_frequency,
+            "churn_ratio": self.churn_ratio,
+            "files_per_commit": self.files_per_commit,
+            "active_span_days": self.active_span_days,
             "first_commit_date": self.first_commit_date,
             "last_commit_date": self.last_commit_date,
         }
+
+        # Add relative metrics if provided
+        if relative_metrics:
+            result.update(relative_metrics)
+        else:
+            result.update(
+                {
+                    "commit_pct": 0.0,
+                    "lines_changed_pct": 0.0,
+                    "files_touched_pct": 0.0,
+                }
+            )
+
+        return result
 
 
 # ============================================================================
@@ -185,6 +256,54 @@ def normalize_author(author_email: str) -> str:
     return author_email.strip().lower()
 
 
+def is_valid_git_url(url: str) -> bool:
+    """
+    Validate if a string is a valid Git repository URL.
+
+    Args:
+        url: URL string to validate
+
+    Returns:
+        True if URL appears to be a valid Git repository URL
+    """
+    # Match GitHub, GitLab, and other common Git hosting patterns
+    patterns = [
+        r"^https?://github\.com/[\w\-]+/[\w\-\.]+(?:\.git)?$",
+        r"^git@github\.com:[\w\-]+/[\w\-\.]+(?:\.git)?$",
+        r"^https?://gitlab\.com/[\w\-]+/[\w\-\.]+(?:\.git)?$",
+        r"^git@gitlab\.com:[\w\-]+/[\w\-\.]+(?:\.git)?$",
+        r"^https?://[^\s]+\.git$",
+        r"^git@[^\s]+\.git$",
+    ]
+
+    return any(re.match(pattern, url.strip(), re.IGNORECASE) for pattern in patterns)
+
+
+def clone_repository(repo_url: str, temp_dir: str) -> None:
+    """
+    Clone a Git repository to a temporary directory.
+
+    Args:
+        repo_url: URL of the repository to clone
+        temp_dir: Path to temporary directory
+
+    Raises:
+        subprocess.CalledProcessError: If git clone fails
+    """
+    sys.stderr.write(f"Cloning repository: {repo_url}\n")
+    try:
+        subprocess.run(
+            ["git", "clone", "--quiet", repo_url, temp_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        sys.stderr.write(f"Repository cloned to: {temp_dir}\n")
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(f"Failed to clone repository: {e.stderr}\n")
+        raise
+
+
 # ============================================================================
 # STATISTICS GATHERING
 # ============================================================================
@@ -241,47 +360,10 @@ def parse_commit_log(git_output: str, stats_dict: Dict[str, AuthorStats]) -> Non
             stats.files_changed += 1
 
 
-def calculate_weekend_commits(
-    common_args: List[str],
-    no_merges: bool,
-    stats_dict: Dict[str, AuthorStats],
-) -> None:
-    """
-    Calculate weekend commit counts for each author.
-
-    Args:
-        common_args: Common git log arguments (refs, dates, pathspecs)
-        no_merges: Whether to exclude merge commits
-        stats_dict: Dictionary to update with statistics
-    """
-    log_args = ["log"] + common_args + [GIT_DATE_FORMAT_WEEKDAY, "--format=%ae %ad"]
-    if no_merges:
-        log_args.append("--no-merges")
-
-    output = run_git(log_args)
-
-    for line in output.splitlines():
-        try:
-            author_email, date_info = line.split(" ", 1)
-        except ValueError:
-            continue
-
-        author_email = normalize_author(author_email)
-
-        try:
-            date_str, day_of_week = date_info.rsplit(" ", 1)
-        except ValueError:
-            continue
-
-        if day_of_week in WEEKEND_DAYS:
-            if author_email not in stats_dict:
-                stats_dict[author_email] = AuthorStats()
-            stats_dict[author_email].weekend_commits += 1
-
-
 def calculate_merge_commits(
     common_args: List[str],
     stats_dict: Dict[str, AuthorStats],
+    cwd: Optional[str] = None,
 ) -> None:
     """
     Calculate merge commit counts for each author.
@@ -289,10 +371,11 @@ def calculate_merge_commits(
     Args:
         common_args: Common git log arguments (refs, dates, pathspecs)
         stats_dict: Dictionary to update with statistics
+        cwd: Working directory for git commands
     """
     log_args = ["log"] + common_args + ["--merges", "--format=%ae"]
 
-    output = run_git(log_args)
+    output = run_git(log_args, cwd=cwd)
 
     for line in output.splitlines():
         author_email = normalize_author(line.strip())
@@ -305,6 +388,7 @@ def calculate_unique_files(
     common_args: List[str],
     no_merges: bool,
     stats_dict: Dict[str, AuthorStats],
+    cwd: Optional[str] = None,
 ) -> None:
     """
     Calculate unique files touched by each author.
@@ -313,12 +397,13 @@ def calculate_unique_files(
         common_args: Common git log arguments (refs, dates, pathspecs)
         no_merges: Whether to exclude merge commits
         stats_dict: Dictionary to update with statistics
+        cwd: Working directory for git commands
     """
     log_args = ["log"] + common_args + ["--name-only", "--format=%ae"]
     if no_merges:
         log_args.append("--no-merges")
 
-    output = run_git(log_args)
+    output = run_git(log_args, cwd=cwd)
     current_author: Optional[str] = None
 
     for line in output.splitlines():
@@ -335,7 +420,7 @@ def calculate_unique_files(
 
 
 def gather_all_statistics(
-    common_args: List[str], no_merges: bool
+    common_args: List[str], no_merges: bool, cwd: Optional[str] = None
 ) -> Dict[str, AuthorStats]:
     """
     Gather all statistics from the git repository.
@@ -343,6 +428,7 @@ def gather_all_statistics(
     Args:
         common_args: Common git log arguments (refs, dates, pathspecs)
         no_merges: Whether to exclude merge commits
+        cwd: Working directory for git commands
 
     Returns:
         Dictionary mapping author emails to their statistics
@@ -358,17 +444,14 @@ def gather_all_statistics(
     if no_merges:
         log_args.append("--no-merges")
 
-    git_output = run_git(log_args)
+    git_output = run_git(log_args, cwd=cwd)
     parse_commit_log(git_output, stats_dict)
 
-    # Calculate weekend commits
-    calculate_weekend_commits(common_args, no_merges, stats_dict)
-
     # Calculate merge commits
-    calculate_merge_commits(common_args, stats_dict)
+    calculate_merge_commits(common_args, stats_dict, cwd=cwd)
 
     # Calculate unique files touched
-    calculate_unique_files(common_args, no_merges, stats_dict)
+    calculate_unique_files(common_args, no_merges, stats_dict, cwd=cwd)
 
     return stats_dict
 
@@ -376,6 +459,54 @@ def gather_all_statistics(
 # ============================================================================
 # OUTPUT FORMATTING
 # ============================================================================
+
+
+def calculate_relative_metrics(stats_dict: Dict[str, AuthorStats]) -> Dict[str, Dict]:
+    """
+    Calculate relative metrics (percentages) for each author.
+
+    Args:
+        stats_dict: Dictionary of author statistics
+
+    Returns:
+        Dictionary mapping author emails to their relative metrics
+    """
+    # Calculate totals
+    total_commits = sum(s.total_commits for s in stats_dict.values())
+    total_lines_changed = sum(s.total_lines_changed for s in stats_dict.values())
+
+    # Get all unique files across all authors
+    all_files = set()
+    for stats in stats_dict.values():
+        all_files.update(stats.unique_files)
+    total_unique_files = len(all_files)
+
+    # Calculate percentages for each author
+    relative_metrics = {}
+    for author_email, stats in stats_dict.items():
+        commit_pct = (
+            0.0
+            if total_commits == 0
+            else round((stats.total_commits / total_commits) * 100, 2)
+        )
+        lines_changed_pct = (
+            0.0
+            if total_lines_changed == 0
+            else round((stats.total_lines_changed / total_lines_changed) * 100, 2)
+        )
+        files_touched_pct = (
+            0.0
+            if total_unique_files == 0
+            else round((len(stats.unique_files) / total_unique_files) * 100, 2)
+        )
+
+        relative_metrics[author_email] = {
+            "commit_pct": commit_pct,
+            "lines_changed_pct": lines_changed_pct,
+            "files_touched_pct": files_touched_pct,
+        }
+
+    return relative_metrics
 
 
 def build_output_rows(stats_dict: Dict[str, AuthorStats]) -> List[Dict]:
@@ -388,10 +519,14 @@ def build_output_rows(stats_dict: Dict[str, AuthorStats]) -> List[Dict]:
     Returns:
         List of dictionaries ready for output
     """
+    # Calculate relative metrics for all authors
+    relative_metrics = calculate_relative_metrics(stats_dict)
+
+    # Build rows
     rows = []
     for author_email in sorted(stats_dict.keys()):
         stats = stats_dict[author_email]
-        rows.append(stats.to_dict(author_email))
+        rows.append(stats.to_dict(author_email, relative_metrics.get(author_email)))
 
     return rows
 
@@ -421,12 +556,16 @@ def parse_arguments() -> argparse.Namespace:
         description="Extract per-developer indicators from a Git repo"
     )
 
-    # Scope options
-    scope = parser.add_mutually_exclusive_group()
-    scope.add_argument(
-        "--all", action="store_true", help="Use all refs (branches, tags)"
+    # Repository source
+    parser.add_argument(
+        "--repo",
+        help="GitHub/GitLab repository URL (will clone temporarily if not local)",
     )
-    scope.add_argument("--branch", help="Only analyze this branch/ref (e.g., main)")
+
+    # Scope options
+    parser.add_argument(
+        "--branch", help="Only analyze this branch/ref (default: all refs)"
+    )
 
     # Filtering options
     parser.add_argument(
@@ -457,11 +596,11 @@ def build_common_git_args(args: argparse.Namespace, pathspecs: List[str]) -> Lis
     """
     common_args = []
 
-    # Add revision range
-    if args.all:
-        common_args.append("--all")
-    elif args.branch:
+    # Add revision range (default to --all unless specific branch specified)
+    if args.branch:
         common_args.append(args.branch)
+    else:
+        common_args.append("--all")
 
     # Add date filters
     if args.since:
@@ -485,23 +624,52 @@ def main() -> None:
     # Parse arguments
     args = parse_arguments()
 
-    # Build configuration
-    pathspecs = build_pathspecs(args.exclude)
+    # Handle repository cloning if URL provided
+    temp_dir = None
+    original_cwd = None
+    working_dir = None
 
-    # Build common git arguments
-    common_args = build_common_git_args(args, pathspecs)
+    try:
+        if args.repo:
+            # Validate URL
+            if not is_valid_git_url(args.repo):
+                sys.stderr.write(f"Error: Invalid Git repository URL: {args.repo}\n")
+                sys.exit(1)
 
-    # Gather all statistics
-    stats_dict = gather_all_statistics(
-        common_args=common_args,
-        no_merges=args.no_merges,
-    )
+            # Create temporary directory and clone
+            temp_dir = tempfile.mkdtemp(prefix="git-audit-")
+            clone_repository(args.repo, temp_dir)
+            working_dir = temp_dir
+        else:
+            # Use current directory
+            working_dir = None
 
-    # Build output rows
-    rows = build_output_rows(stats_dict)
+        # Build configuration
+        pathspecs = build_pathspecs(args.exclude)
 
-    # Write output to stdout as CSV
-    write_csv_output(rows, sys.stdout)
+        # Build common git arguments
+        common_args = build_common_git_args(args, pathspecs)
+
+        # Gather all statistics
+        # Note: run_git function already supports cwd parameter
+        # We need to pass working_dir to gather_all_statistics
+        stats_dict = gather_all_statistics(
+            common_args=common_args,
+            no_merges=args.no_merges,
+            cwd=working_dir,
+        )
+
+        # Build output rows
+        rows = build_output_rows(stats_dict)
+
+        # Write output to stdout as CSV
+        write_csv_output(rows, sys.stdout)
+
+    finally:
+        # Clean up temporary directory if created
+        if temp_dir and os.path.exists(temp_dir):
+            sys.stderr.write(f"Cleaning up temporary directory: {temp_dir}\n")
+            shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
