@@ -1,86 +1,83 @@
 # git-audit
 
-Extract per-developer metrics from Git repositories with comprehensive evaluation indicators. Zero dependencies, outputs CSV.
+Developer evaluation tool using SPACE framework + Git metrics. Zero dependencies, outputs CSV.
 
 ## Quick Start
 
 ```bash
-# Generate indicators for current repository
-python3 git-audit.py > output.csv
-
-# Generate indicators with analysis report
+# Analyze current repository
 python3 git-audit.py --print
 
 # Analyze remote repository
 python3 git-audit.py --repo https://github.com/user/repo.git --print
+
+# For educational teams (aggregate multiple GitHub accounts per student)
+python3 git-audit.py --repo <URL> --roster students.csv --mapping github_mapping.csv --print
 ```
 
 ## Output
 
-Generates **68 metrics** per developer in CSV format:
+Generates **86 metrics** per developer/student in CSV format:
 
-- Base metrics (commits, lines by type, file operations by type, collaboration)
-- Calculated indicators (frequency, ratios, averages, bug fix ratio)
-- Team-relative percentages
-- **Evaluation scores** (0.0-1.0): productivity, quality, collaboration, overall
+- **79 Git metrics**: Commits, lines, files (by 7 types: code/docs/config/database/architecture/management/test)
+- **6 SPACE scores** (0.0-1.0): Satisfaction, Performance, Activity, Communication, Efficiency, Overall
+- **1 AGES level**: Student level (I/II/III/IV) for educational contexts
 
-📊 **See [METRICS.md](METRICS.md) for complete metrics reference**
-📚 **See [METHODOLOGY.md](METHODOLOGY.md) for implementation methodology**
-🎓 **See [ACADEMIC_RESEARCH.md](ACADEMIC_RESEARCH.md) for academic foundations and framework comparisons**
+## Parameters
 
-## Usage
+### Basic Usage
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `--print` | Save CSV to file and generate analysis report | `--print` |
+| `--output` | Output filename (default: `output.csv`) | `--output team.csv` |
+| `--repo` | Clone and analyze remote repository | `--repo https://github.com/user/repo.git` |
+
+### Educational Teams (AGES)
+
+| Parameter | Description | Format |
+|-----------|-------------|--------|
+| `--roster` | Student roster with AGES levels | CSV: `student_name,ages_level` (I/II/III/IV) |
+| `--mapping` | Map GitHub emails to students | CSV: `student_name,author_email` |
+| `--survey` | Satisfaction survey responses | CSV: `author_email,q1,q2,...,q14` (1-5 Likert scale) |
+
+**Educational team workflow:**
+1. Create `students.csv` with student names and AGES levels (I/II/III/IV)
+2. Create `github_mapping.csv` mapping each GitHub email to student name
+3. Run: `python3 git-audit.py --repo <URL> --roster students.csv --mapping github_mapping.csv --print`
+4. Metrics from multiple GitHub accounts are automatically aggregated per student
+
+### Examples
 
 ```bash
-# Local repository
-python3 git-audit.py > report.csv
+# Basic analysis (local repo)
 python3 git-audit.py --print
 
 # Remote repository
-python3 git-audit.py --repo https://github.com/user/repo.git --print
+python3 git-audit.py --repo https://github.com/ConexaoTreinamento/conexao-treinamento.git --print
 
-# Custom output file
-python3 git-audit.py --print --output team_analysis.csv
+# Educational team with student aggregation
+python3 git-audit.py --repo <URL> --roster students.csv --mapping github_mapping.csv --output team.csv --print
+
+# With satisfaction survey
+python3 git-audit.py --repo <URL> --roster students.csv --mapping github_mapping.csv --survey satisfaction.csv --print
 ```
-
-**The script automatically:**
-- Analyzes all branches
-- Includes merge and non-merge commits
-- Collects complete data for accurate indicators
-- Generates analysis reports with `--print`
-
-## Options
-
-```
---repo <url>         Clone and analyze remote repository
---print              Save CSV + generate analysis report
---output <file>      Custom output filename (default: output.csv)
-```
-
-## Files
-
-- **git-audit.py** - Main script (enhanced with file categorization, bug fix detection, code review tracking, dynamic thresholds)
-- **METRICS.md** - Complete metrics reference (68 metrics)
-- **METHODOLOGY.md** - Implementation methodology and design decisions
-- **METHODOLOGY_AGES.md** - Specialized methodology for AGES educational teams
-- **ACADEMIC_RESEARCH.md** - Academic foundations, framework comparisons, and bibliography (50+ citations)
-- **TEAM_FORMATION.md** - AGES team structure and progression model
-- **README.md** - This file
-
-## Key Features
-
-✅ **File Type Categorization** - Distinguishes code, documentation, and configuration contributions
-✅ **Bug Fix Detection** - Identifies maintenance vs. feature work from commit messages
-✅ **Code Review Tracking** - Credits reviewers via commit trailers (`Reviewed-by`, `Co-authored-by`)
-✅ **Dynamic Thresholds** - Context-aware evaluation adapted to team size and norms
-✅ **Multi-Dimensional Assessment** - Productivity, Quality, Collaboration (backed by academic research)
 
 ## Documentation
 
-📊 **[METRICS.md](METRICS.md)** - Detailed reference for all 68 metrics
-📚 **[METHODOLOGY.md](METHODOLOGY.md)** - Implementation details and design decisions
-🎓 **[ACADEMIC_RESEARCH.md](ACADEMIC_RESEARCH.md)** - Academic frameworks (DORA, SPACE, MSR) and 50+ research citations
-🎯 **[METHODOLOGY_AGES.md](METHODOLOGY_AGES.md)** - Specialized methodology for educational teams (AGES)
-👥 **[TEAM_FORMATION.md](TEAM_FORMATION.md)** - AGES team structure and progression model
+- 📊 **[METRICS.md](docs/METRICS.md)** - All 86 metrics explained (79 Git + 6 SPACE + 1 AGES level)
+- 📚 **[METHODOLOGY.md](docs/METHODOLOGY.md)** - SPACE framework implementation + AGES adaptations
+- 🎓 **[ACADEMIC_RESEARCH.md](docs/ACADEMIC_RESEARCH.md)** - Research foundations (DORA, SPACE, MSR)
+- 🏫 **[AGES.md](docs/AGES.md)** - AGES educational context (PUCRS)
+
+## Key Features
+
+- ✅ **SPACE Framework** - 5-dimension developer evaluation (Forsgren et al., 2021)
+- ✅ **Student Aggregation** - Merge multiple GitHub accounts into single student records
+- ✅ **File Type Weights** - 7 categories with domain-specific importance (code: 1.0, docs: 0.5, config: 0.3, etc.)
+- ✅ **Bug Fix Detection** - Automatic classification from commit messages
+- ✅ **Code Review Tracking** - Credits via commit trailers (`Reviewed-by`, `Co-authored-by`)
+- ✅ **Satisfaction Surveys** - External survey integration for SPACE Satisfaction dimension
 
 ## License
 

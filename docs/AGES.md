@@ -1,4 +1,4 @@
-# AGES Development Team Formation
+# AGES Development Team
 
 ## Overview
 
