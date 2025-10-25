@@ -1,103 +1,69 @@
 # git-audit
 
-Extract per-developer metrics from Git repositories. Zero dependencies, outputs CSV.
+Extract per-developer metrics from Git repositories with comprehensive evaluation indicators. Zero dependencies, outputs CSV.
 
-## Installation
+## Quick Start
 
 ```bash
-# Run directly from GitHub
-curl -sSL https://raw.githubusercontent.com/miguelxvr/git-audit/main/git-audit.py | python3
+# Generate indicators for current repository
+python3 git-audit.py > output.csv
 
-# Or download locally
-curl -sSL https://raw.githubusercontent.com/miguelxvr/git-audit/main/git-audit.py -o git-audit.py
-chmod +x git-audit.py
+# Generate indicators with analysis report
+python3 git-audit.py --print
+
+# Analyze remote repository
+python3 git-audit.py --repo https://github.com/user/repo.git --print
 ```
+
+## Output
+
+Generates **37 metrics** per developer in CSV format:
+
+- Base metrics (commits, lines, files operations)
+- Calculated indicators (frequency, ratios, averages)
+- Team-relative percentages
+- **Evaluation scores** (0.0-1.0): productivity, quality, collaboration, overall
+
+📊 **See [METRICS.md](METRICS.md) for complete documentation**
 
 ## Usage
 
 ```bash
-# Local repository (analyzes all branches by default)
-python3 git-audit.py --no-merges > report.csv
+# Local repository
+python3 git-audit.py > report.csv
+python3 git-audit.py --print
 
-# Analyze remote GitHub/GitLab repository
-python3 git-audit.py --repo https://github.com/user/repo.git > report.csv
+# Remote repository
+python3 git-audit.py --repo https://github.com/user/repo.git --print
 
-# With date range
-python3 git-audit.py --since 2024-01-01 --until 2024-12-31 > report.csv
-
-# Specific branch only
-python3 git-audit.py --branch main > report.csv
-
-# Exclude paths
-python3 git-audit.py --exclude 'vendor/' --exclude 'dist/' > report.csv
+# Custom output file
+python3 git-audit.py --print --output team_analysis.csv
 ```
 
-## Metrics
-
-Per author/email:
-
-**Base Metrics:**
-- `commits_non_merge`, `merge_commits`, `total_commits`
-- `lines_added`, `lines_deleted`, `total_lines_changed`
-- `files_changed`, `unique_files_touched`
-
-**Calculated Indicators (great for plotting!):**
-- `avg_commit_size_lines` - Average lines per commit
-- `commit_frequency` - Commits per active day
-- `churn_ratio` - Deletions/additions ratio (refactoring indicator)
-- `files_per_commit` - Average files changed per commit
-- `active_span_days` - Days between first and last commit
-- `active_days` - Number of unique days with commits
-
-**Relative Metrics (team comparison):**
-- `commit_pct` - Percentage of total commits
-- `lines_changed_pct` - Percentage of total lines changed
-- `files_touched_pct` - Percentage of codebase touched
-
-**Timeline:**
-- `first_commit_date`, `last_commit_date`
+**The script automatically:**
+- Analyzes all branches
+- Includes merge and non-merge commits
+- Collects complete data for accurate indicators
+- Generates analysis reports with `--print`
 
 ## Options
 
 ```
---repo <url>         GitHub/GitLab repository URL (clones temporarily)
---branch <name>      Analyze specific branch (default: all refs)
---no-merges          Exclude merge commits
---since YYYY-MM-DD   Start date
---until YYYY-MM-DD   End date
---exclude <path>     Exclude paths (repeatable)
+--repo <url>         Clone and analyze remote repository
+--print              Save CSV + generate analysis report
+--output <file>      Custom output filename (default: output.csv)
 ```
 
-## Visualization Ideas
+## Files
 
-The CSV output is designed for easy plotting. Here are some chart ideas:
-
-**Team Comparison:**
-- Bar chart: `commit_pct` by author
-- Pie chart: `lines_changed_pct` by author
-- Horizontal bar: `files_touched_pct` by author
-
-**Activity Patterns:**
-- Scatter: `active_days` vs `total_commits`
-- Line chart: `commit_frequency` over authors
-- Timeline: `first_commit_date` to `last_commit_date` by author
-
-**Code Quality Indicators:**
-- Bar chart: `churn_ratio` by author (low = new features, high = refactoring)
-- Scatter: `avg_commit_size_lines` vs `files_per_commit`
-- Heatmap: Multiple metrics normalized by author
-
-**Contribution Distribution:**
-- Stacked bar: `lines_added` vs `lines_deleted` by author
-- Bubble chart: `total_commits` (x) vs `unique_files_touched` (y), sized by `total_lines_changed`
-
-Use tools like Excel, Google Sheets, Python (matplotlib/seaborn), or R (ggplot2) to visualize!
-
-## Requirements
-
-- Python 3.6+
-- Git repository
+- **git-audit.py** - Main script (~1300 lines)
+- **METRICS.md** - Complete metrics documentation
+- **README.md** - This file
 
 ## License
 
 MIT
+
+---
+
+**For detailed metrics documentation**, see [METRICS.md](METRICS.md)
