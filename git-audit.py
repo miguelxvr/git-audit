@@ -1,43 +1,75 @@
 #!/usr/bin/env python3
 """
-A fast, dependency-free extractor of per-developer evaluation indicators from Git.
+Enhanced developer evaluation tool with academic research-backed improvements.
 
-The script automatically analyzes all branches and commits to generate comprehensive
-developer evaluation indicators. No filtering is needed - the script intelligently
-collects and processes the right data for accurate metrics.
+Generates 68 comprehensive metrics per developer, including:
+- File type categorization (code/docs/config with weighted productivity)
+- Bug fix detection (maintenance vs. feature work classification)
+- Code review participation tracking (Reviewed-by, Co-authored-by trailers)
+- Dynamic threshold calibration (adapts to team size and context)
+- Multi-dimensional assessment (productivity, quality, collaboration)
 
 Usage:
-  python3 git-audit.py > indicators.csv
-  python3 git-audit.py --repo https://github.com/user/repo.git > indicators.csv
+  python3 git-audit.py > output.csv
+  python3 git-audit.py --repo https://github.com/user/repo.git > output.csv
   python3 git-audit.py --print
-  python3 git-audit.py --print --output my_data.csv
+  python3 git-audit.py --print --output team_analysis.csv
 
 Options:
   --repo URL : GitHub/GitLab repository URL (clones temporarily)
-  --print : Save output to file and automatically generate analysis report
+  --print : Save CSV and generate analysis report
   --output FILE : Output CSV filename (default: output.csv)
 
-Metrics (per author/email):
-  Author info: author_name, author_email
-  Base metrics: commits_non_merge, commits_merge, lines_added, lines_deleted,
-    files_added, files_deleted, files_modified, files_binary, files_touched,
-    days_active
-  Aggregated metrics: commits_total, lines_total, files_total
-  Calculated indicators: lines_per_commit_avg, commits_freq, lines_churn_ratio,
-    files_per_commit_avg, days_span
-  Relative metrics: commits_team_pct, lines_team_pct, files_team_pct
-  Dates: commits_first_date, commits_last_date
+Metrics Overview (68 total):
 
-Evaluation Indicators (0.0 to 1.0 scale):
+Author Information (2):
+  author_name, author_email
+
+Commits Domain (9):
+  commits_non_merge, commits_merge, commits_bugfix, commits_feature, commits_total,
+  commits_bugfix_ratio, commits_coauthored, commits_freq, commits_team_pct
+
+Lines Domain - Totals (6):
+  lines_added, lines_deleted, lines_total, lines_per_commit_avg,
+  lines_churn_ratio, lines_team_pct
+
+Lines Domain - By Type (9):
+  lines_code_added, lines_code_deleted, lines_code_total,
+  lines_docs_added, lines_docs_deleted, lines_docs_total,
+  lines_config_added, lines_config_deleted, lines_config_total
+
+Files Domain - Totals (8):
+  files_added, files_deleted, files_modified, files_binary,
+  files_total, files_touched, files_per_commit_avg, files_team_pct
+
+Files Domain - By Type (12):
+  files_code_added, files_code_deleted, files_code_modified, files_code_total,
+  files_docs_added, files_docs_deleted, files_docs_modified, files_docs_total,
+  files_config_added, files_config_deleted, files_config_modified, files_config_total
+
+Days Domain (4):
+  days_active, days_span, commits_first_date, commits_last_date
+
+Collaboration (1):
+  reviews_given
+
+Evaluation Indicators (13):
   Productivity: prod_rel, prod_abs, prod_stat, prod_score
   Quality: quality_rel, quality_abs, quality_stat, quality_score
   Collaboration: collab_rel, collab_abs, collab_stat, collab_score
-  Overall: overall_score
 
-  Three normalization methods:
-    - Relative: min-max within team
-    - Absolute: predefined thresholds
-    - Statistical: percentile-based
+Overall Score (1):
+  overall_score (weighted: 33.3% productivity, 33.3% quality, 33.4% collaboration)
+
+Key Features:
+  ✅ File Type Weighting: Code 100%, Docs 50%, Config 30%
+  ✅ Bug Fix Detection: Patterns like 'fix', 'bug', 'issue #', 'hotfix'
+  ✅ Code Review Credits: Reviewed-by, Co-authored-by, Acked-by trailers
+  ✅ Dynamic Thresholds: 90th percentile = excellent, 25th = poor (team-adapted)
+  ✅ Multi-Method Normalization: Averages relative, absolute, statistical
+
+See METHODOLOGY.md for academic research foundation and design rationale.
+See METRICS.md for complete documentation of all 68 metrics.
 """
 
 import argparse
@@ -55,48 +87,8 @@ from typing import Dict, List, Optional, Set, Tuple
 # CONSTANTS
 # ============================================================================
 
-GIT_LOG_FORMAT_HEADER = "%H%x09%an%x09%ae%x09%ad"
+GIT_LOG_FORMAT_HEADER = "%H%x09%an%x09%ae%x09%ad%n%B%n--END-COMMIT--"
 GIT_DATE_FORMAT_SHORT = "--date=short"
-
-# ============================================================================
-# EVALUATION INDICATOR THRESHOLDS (for absolute normalization)
-# ============================================================================
-
-# Productivity thresholds (excellent = high performance, poor = low performance)
-PRODUCTIVITY_THRESHOLDS = {
-    "commits_excellent": 50,
-    "commits_poor": 5,
-    "lines_excellent": 10000,
-    "lines_poor": 500,
-    "files_excellent": 100,
-    "files_poor": 10,
-    "active_days_excellent": 30,
-    "active_days_poor": 3,
-}
-
-# Quality thresholds (note: some are inverted - lower is better)
-QUALITY_THRESHOLDS = {
-    "churn_ratio_excellent": 0.2,  # Lower is better (more new code)
-    "churn_ratio_poor": 1.5,  # Higher is worse (more deletions)
-    "commit_size_excellent_min": 50,  # Not too small
-    "commit_size_excellent_max": 500,  # Not too large
-    "commit_size_poor_min": 5,
-    "commit_size_poor_max": 2000,
-    "files_per_commit_excellent": 3,  # Focused commits
-    "files_per_commit_poor": 15,  # Too scattered
-    "merge_ratio_excellent": 0.1,  # Lower is better (fewer merge issues)
-    "merge_ratio_poor": 0.4,  # Higher indicates complexity
-}
-
-# Collaboration thresholds
-COLLABORATION_THRESHOLDS = {
-    "merge_commits_excellent": 5,
-    "merge_commits_poor": 0,
-    "shared_files_pct_excellent": 50,  # % of files touched by others
-    "shared_files_pct_poor": 10,
-    "active_span_excellent": 60,  # Days of sustained engagement
-    "active_span_poor": 7,
-}
 
 # Dimension weights (must sum to 1.0)
 DIMENSION_WEIGHTS = {
@@ -106,28 +98,64 @@ DIMENSION_WEIGHTS = {
 }
 
 OUTPUT_FIELDNAMES = [
+    # Author information
     "author_name",
     "author_email",
+    # Commits domain
     "commits_non_merge",
     "commits_merge",
+    "commits_bugfix",
+    "commits_feature",
     "commits_total",
+    "commits_bugfix_ratio",
+    "commits_coauthored",
+    # Lines domain - totals
     "lines_added",
     "lines_deleted",
     "lines_total",
+    # Lines domain - by type
+    "lines_code_added",
+    "lines_code_deleted",
+    "lines_code_total",
+    "lines_docs_added",
+    "lines_docs_deleted",
+    "lines_docs_total",
+    "lines_config_added",
+    "lines_config_deleted",
+    "lines_config_total",
+    # Files domain - totals
     "files_added",
     "files_deleted",
     "files_modified",
     "files_binary",
     "files_total",
     "files_touched",
+    # Files domain - by type
+    "files_code_added",
+    "files_code_deleted",
+    "files_code_modified",
+    "files_code_total",
+    "files_docs_added",
+    "files_docs_deleted",
+    "files_docs_modified",
+    "files_docs_total",
+    "files_config_added",
+    "files_config_deleted",
+    "files_config_modified",
+    "files_config_total",
+    # Calculated metrics
     "lines_per_commit_avg",
-    "days_active",
+    "files_per_commit_avg",
     "commits_freq",
     "lines_churn_ratio",
-    "files_per_commit_avg",
+    # Days domain
+    "days_active",
     "days_span",
     "commits_first_date",
     "commits_last_date",
+    # Collaboration
+    "reviews_given",
+    # Relative metrics
     "commits_team_pct",
     "lines_team_pct",
     "files_team_pct",
@@ -152,6 +180,154 @@ OUTPUT_FIELDNAMES = [
 
 
 # ============================================================================
+# FILE CATEGORIZATION
+# ============================================================================
+
+# File extensions for categorization
+CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".java",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".swift",
+    ".kt",
+    ".kts",
+    ".scala",
+    ".m",
+    ".mm",
+    ".pl",
+    ".pm",
+    ".r",
+    ".R",
+    ".dart",
+    ".lua",
+    ".sh",
+    ".bash",
+    ".sql",
+    ".htm",
+    ".html",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".vue",
+    ".svelte",
+    ".ex",
+    ".exs",
+    ".erl",
+    ".hrl",
+    ".clj",
+    ".cljs",
+    ".hs",
+    ".elm",
+    ".ml",
+    ".fs",
+    ".fsx",
+    ".vb",
+    ".asm",
+    ".s",
+}
+
+DOCS_EXTENSIONS = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".asciidoc",
+    ".tex",
+    ".org",
+    ".rtf",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".odt",
+}
+
+CONFIG_EXTENSIONS = {
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".config",
+    ".properties",
+    ".env",
+    ".editorconfig",
+    ".gitignore",
+    ".dockerignore",
+    ".eslintrc",
+    ".prettierrc",
+    ".babelrc",
+    ".npmrc",
+    ".gemfile",
+    "Gemfile.lock",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "pom.xml",
+    "build.gradle",
+    "settings.gradle",
+    "Makefile",
+    "CMakeLists.txt",
+}
+
+
+def categorize_file(filename: str) -> str:
+    """
+    Categorize a file as 'code', 'docs', 'config', or 'other'.
+
+    Args:
+        filename: File path or name
+
+    Returns:
+        Category string: 'code', 'docs', 'config', or 'other'
+    """
+    filename_lower = filename.lower()
+
+    # Check for specific filenames (case-insensitive)
+    basename = filename_lower.split("/")[-1]
+    if basename in {"makefile", "dockerfile", "rakefile", "gemfile", "vagrantfile"}:
+        return "config"
+    if basename in {"readme", "license", "contributing", "changelog", "authors"}:
+        return "docs"
+
+    # Check extension
+    for ext in CODE_EXTENSIONS:
+        if filename_lower.endswith(ext):
+            return "code"
+
+    for ext in DOCS_EXTENSIONS:
+        if filename_lower.endswith(ext):
+            return "docs"
+
+    for ext in CONFIG_EXTENSIONS:
+        if filename_lower.endswith(ext):
+            return "config"
+
+    # Default to 'other' (could be binary, test data, etc.)
+    return "other"
+
+
+# ============================================================================
 # DATA STRUCTURES
 # ============================================================================
 
@@ -163,12 +339,39 @@ class AuthorStats:
     author_name: str = ""
     commits_non_merge: int = 0
     commits_merge: int = 0
+    commits_bugfix: int = 0
+
+    # Lines by type
     lines_added: int = 0
     lines_deleted: int = 0
+    lines_code_added: int = 0
+    lines_code_deleted: int = 0
+    lines_docs_added: int = 0
+    lines_docs_deleted: int = 0
+    lines_config_added: int = 0
+    lines_config_deleted: int = 0
+
+    # Files by operation
     files_added: int = 0
     files_deleted: int = 0
     files_modified: int = 0
     files_binary: int = 0
+
+    # Files by type and operation
+    files_code_added: int = 0
+    files_code_deleted: int = 0
+    files_code_modified: int = 0
+    files_docs_added: int = 0
+    files_docs_deleted: int = 0
+    files_docs_modified: int = 0
+    files_config_added: int = 0
+    files_config_deleted: int = 0
+    files_config_modified: int = 0
+
+    # Collaboration
+    reviews_given: int = 0
+    commits_coauthored: int = 0
+
     total_files_changed: int = 0
     days_active: Set[str] = field(default_factory=set)
     files: Set[str] = field(default_factory=set)
@@ -232,6 +435,56 @@ class AuthorStats:
         except (ValueError, TypeError):
             return 0
 
+    @property
+    def commits_feature(self) -> int:
+        """Feature/development commits (non-merge, non-bugfix)."""
+        return max(0, self.commits_non_merge - self.commits_bugfix)
+
+    @property
+    def commits_bugfix_ratio(self) -> float:
+        """Percentage of commits that are bug fixes."""
+        if self.commits_non_merge == 0:
+            return 0.0
+        return round((self.commits_bugfix / self.commits_non_merge) * 100, 2)
+
+    @property
+    def lines_code_total(self) -> int:
+        """Total code lines changed."""
+        return self.lines_code_added + self.lines_code_deleted
+
+    @property
+    def lines_docs_total(self) -> int:
+        """Total documentation lines changed."""
+        return self.lines_docs_added + self.lines_docs_deleted
+
+    @property
+    def lines_config_total(self) -> int:
+        """Total configuration lines changed."""
+        return self.lines_config_added + self.lines_config_deleted
+
+    @property
+    def files_code_total(self) -> int:
+        """Total code files changed."""
+        return (
+            self.files_code_added + self.files_code_deleted + self.files_code_modified
+        )
+
+    @property
+    def files_docs_total(self) -> int:
+        """Total documentation files changed."""
+        return (
+            self.files_docs_added + self.files_docs_deleted + self.files_docs_modified
+        )
+
+    @property
+    def files_config_total(self) -> int:
+        """Total configuration files changed."""
+        return (
+            self.files_config_added
+            + self.files_config_deleted
+            + self.files_config_modified
+        )
+
     def to_dict(
         self, author_email: str, relative_metrics: Optional[Dict] = None
     ) -> Dict:
@@ -243,28 +496,63 @@ class AuthorStats:
             relative_metrics: Optional dict with relative percentages and evaluation indicators
         """
         result = {
+            # Author information
             "author_name": self.author_name,
             "author_email": author_email,
+            # Commits domain
             "commits_non_merge": self.commits_non_merge,
             "commits_merge": self.commits_merge,
+            "commits_bugfix": self.commits_bugfix,
+            "commits_feature": self.commits_feature,
             "commits_total": self.commits_total,
+            "commits_bugfix_ratio": self.commits_bugfix_ratio,
+            "commits_coauthored": self.commits_coauthored,
+            # Lines domain - totals
             "lines_added": self.lines_added,
             "lines_deleted": self.lines_deleted,
             "lines_total": self.lines_total,
+            # Lines domain - by type
+            "lines_code_added": self.lines_code_added,
+            "lines_code_deleted": self.lines_code_deleted,
+            "lines_code_total": self.lines_code_total,
+            "lines_docs_added": self.lines_docs_added,
+            "lines_docs_deleted": self.lines_docs_deleted,
+            "lines_docs_total": self.lines_docs_total,
+            "lines_config_added": self.lines_config_added,
+            "lines_config_deleted": self.lines_config_deleted,
+            "lines_config_total": self.lines_config_total,
+            # Files domain - totals
             "files_added": self.files_added,
             "files_deleted": self.files_deleted,
             "files_modified": self.files_modified,
             "files_binary": self.files_binary,
             "files_total": self.total_files_changed,
             "files_touched": len(self.files),
+            # Files domain - by type
+            "files_code_added": self.files_code_added,
+            "files_code_deleted": self.files_code_deleted,
+            "files_code_modified": self.files_code_modified,
+            "files_code_total": self.files_code_total,
+            "files_docs_added": self.files_docs_added,
+            "files_docs_deleted": self.files_docs_deleted,
+            "files_docs_modified": self.files_docs_modified,
+            "files_docs_total": self.files_docs_total,
+            "files_config_added": self.files_config_added,
+            "files_config_deleted": self.files_config_deleted,
+            "files_config_modified": self.files_config_modified,
+            "files_config_total": self.files_config_total,
+            # Calculated metrics
             "lines_per_commit_avg": self.lines_per_commit_avg,
-            "days_active": self.days_active_count,
+            "files_per_commit_avg": self.files_per_commit_avg,
             "commits_freq": self.commits_freq,
             "lines_churn_ratio": self.lines_churn_ratio,
-            "files_per_commit_avg": self.files_per_commit_avg,
+            # Days domain
+            "days_active": self.days_active_count,
             "days_span": self.days_span,
             "commits_first_date": self.commits_first_date,
             "commits_last_date": self.commits_last_date,
+            # Collaboration
+            "reviews_given": self.reviews_given,
         }
 
         # Add relative metrics and evaluation indicators if provided
@@ -533,6 +821,55 @@ def normalize_statistical(value: float, values_list: List[float]) -> float:
 
 
 # ============================================================================
+# DYNAMIC THRESHOLD CALIBRATION
+# ============================================================================
+
+
+def calculate_dynamic_thresholds(stats_dict: Dict[str, "AuthorStats"]) -> Dict:
+    """
+    Calculate dynamic thresholds based on team distribution.
+    Uses percentiles to adapt to repository context instead of fixed values.
+
+    Args:
+        stats_dict: Dictionary of author statistics
+
+    Returns:
+        Dictionary of dynamic thresholds for absolute normalization
+    """
+    # Extract values for all authors
+    commits_values = [
+        s.commits_non_merge for s in stats_dict.values() if s.commits_non_merge > 0
+    ]
+    merge_commits_values = [s.commits_merge for s in stats_dict.values()]
+
+    # Calculate percentiles (25th = poor, 90th = excellent)
+    def safe_percentile(values, p, default):
+        if not values:
+            return default
+        sorted_vals = sorted(values)
+        idx = int(len(sorted_vals) * p / 100)
+        return sorted_vals[min(idx, len(sorted_vals) - 1)]
+
+    p25_commits = safe_percentile(commits_values, 25, 5)
+    p90_commits = safe_percentile(commits_values, 90, 50)
+
+    p25_merges = safe_percentile(merge_commits_values, 25, 0)
+    p90_merges = safe_percentile(merge_commits_values, 90, 5)
+
+    # Return thresholds adapted to team context
+    thresholds = {
+        # Productivity: Dynamic based on team distribution
+        "commits_excellent": max(p90_commits, 10),  # At least 10
+        "commits_poor": max(p25_commits, 1),  # At least 1
+        # Collaboration: Dynamic merge commits
+        "merge_commits_excellent": max(p90_merges, 3),  # At least 3
+        "merge_commits_poor": max(p25_merges, 0),  # At least 0
+    }
+
+    return thresholds
+
+
+# ============================================================================
 # EVALUATION INDICATORS - DIMENSION CALCULATORS
 # ============================================================================
 
@@ -540,6 +877,7 @@ def normalize_statistical(value: float, values_list: List[float]) -> float:
 def calculate_productivity_raw(stats: AuthorStats) -> float:
     """
     Calculate raw productivity indicator based on volume and consistency.
+    Weights code contributions higher than docs/config.
 
     Args:
         stats: Author statistics
@@ -553,10 +891,29 @@ def calculate_productivity_raw(stats: AuthorStats) -> float:
     files_weight = 0.20
     days_active_weight = 0.10
 
+    # File type weights (code > docs > config)
+    code_weight = 1.0
+    docs_weight = 0.5
+    config_weight = 0.3
+
+    # Calculate weighted lines
+    weighted_lines = (
+        stats.lines_code_total * code_weight
+        + stats.lines_docs_total * docs_weight
+        + stats.lines_config_total * config_weight
+    )
+
+    # Calculate weighted files
+    weighted_files = (
+        stats.files_code_total * code_weight
+        + stats.files_docs_total * docs_weight
+        + stats.files_config_total * config_weight
+    )
+
     # Calculate components (raw values)
     commit_component = stats.commits_non_merge * commit_weight
-    lines_component = stats.lines_total * lines_weight
-    files_component = len(stats.files) * files_weight
+    lines_component = weighted_lines * lines_weight
+    files_component = weighted_files * files_weight
     days_active_component = stats.days_active_count * days_active_weight
 
     # Sum weighted components
@@ -570,7 +927,7 @@ def calculate_productivity_raw(stats: AuthorStats) -> float:
 def calculate_quality_raw(stats: AuthorStats) -> float:
     """
     Calculate raw quality indicator based on code practices.
-    Lower churn, appropriate commit sizes, focused commits.
+    Lower churn, appropriate commit sizes, focused commits, and bug fix responsiveness.
 
     Args:
         stats: Author statistics
@@ -578,10 +935,7 @@ def calculate_quality_raw(stats: AuthorStats) -> float:
     Returns:
         Raw quality score (unnormalized, 0-100 scale before normalization)
     """
-    # Start with a base score of 100
-    quality_score = 100.0
-
-    # Component 1: Churn ratio (35% weight)
+    # Component 1: Churn ratio (30% weight)
     # Lower is better: 0.0-0.2 is excellent, > 1.5 is poor
     churn = stats.lines_churn_ratio
     if churn <= 0.2:
@@ -591,7 +945,7 @@ def calculate_quality_raw(stats: AuthorStats) -> float:
     else:
         churn_score = 100 * (1 - ((churn - 0.2) / (1.5 - 0.2)))
 
-    # Component 2: Commit size (25% weight)
+    # Component 2: Commit size (20% weight)
     # Optimal range: 50-500 lines per commit
     commit_size = stats.lines_per_commit_avg
     if 50 <= commit_size <= 500:
@@ -601,7 +955,7 @@ def calculate_quality_raw(stats: AuthorStats) -> float:
     else:  # > 500
         size_score = max(0, 100 * (1 - ((commit_size - 500) / 1500)))
 
-    # Component 3: Files per commit (25% weight)
+    # Component 3: Files per commit (20% weight)
     # Lower is better: 1-3 is excellent, > 15 is poor
     files_per = stats.files_per_commit_avg
     if files_per <= 3:
@@ -625,9 +979,26 @@ def calculate_quality_raw(stats: AuthorStats) -> float:
     else:
         merge_score = 100 * (1 - ((merge_ratio - 0.1) / (0.4 - 0.1)))
 
+    # Component 5: Bug fix ratio (15% weight)
+    # Moderate is best: shows responsiveness without being all reactive
+    # 15-35% is optimal range
+    bugfix_ratio = stats.commits_bugfix_ratio
+    if 15 <= bugfix_ratio <= 35:
+        bugfix_score = 100
+    elif bugfix_ratio < 15:
+        bugfix_score = max(0, 100 * (bugfix_ratio / 15))
+    elif bugfix_ratio > 35:
+        bugfix_score = max(0, 100 * (1 - ((bugfix_ratio - 35) / 65)))
+    else:
+        bugfix_score = 50
+
     # Weighted sum
     quality_score = (
-        churn_score * 0.35 + size_score * 0.25 + files_score * 0.25 + merge_score * 0.15
+        churn_score * 0.30
+        + size_score * 0.20
+        + files_score * 0.20
+        + merge_score * 0.15
+        + bugfix_score * 0.15
     )
 
     return quality_score
@@ -635,7 +1006,7 @@ def calculate_quality_raw(stats: AuthorStats) -> float:
 
 def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> float:
     """
-    Calculate raw collaboration indicator.
+    Calculate raw collaboration indicator including code review participation.
 
     Args:
         stats: Author statistics
@@ -644,7 +1015,7 @@ def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> 
     Returns:
         Raw collaboration score (0-100 scale)
     """
-    # Component 1: Merge activity (40% weight)
+    # Component 1: Merge activity (30% weight)
     # Having some merge commits indicates integration work
     merge_commits = stats.commits_merge
     if merge_commits >= 5:
@@ -654,7 +1025,7 @@ def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> 
     else:
         merge_score = (merge_commits / 5) * 100
 
-    # Component 2: Shared file ownership (35% weight)
+    # Component 2: Shared file ownership (30% weight)
     # Higher percentage means more collaboration
     if shared_files_pct >= 50:
         shared_score = 100
@@ -663,7 +1034,17 @@ def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> 
     else:
         shared_score = ((shared_files_pct - 10) / (50 - 10)) * 100
 
-    # Component 3: Active span consistency (25% weight)
+    # Component 3: Code review participation (20% weight)
+    # Reviews given and co-authored commits indicate collaboration
+    review_participation = stats.reviews_given + stats.commits_coauthored
+    if review_participation >= 10:
+        review_score = 100
+    elif review_participation == 0:
+        review_score = 0
+    else:
+        review_score = (review_participation / 10) * 100
+
+    # Component 4: Active span consistency (20% weight)
     # Longer engagement indicates sustained collaboration
     active_span = stats.days_span
     if active_span >= 60:
@@ -674,7 +1055,12 @@ def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> 
         span_score = ((active_span - 7) / (60 - 7)) * 100
 
     # Weighted sum
-    collaboration_score = merge_score * 0.40 + shared_score * 0.35 + span_score * 0.25
+    collaboration_score = (
+        merge_score * 0.30
+        + shared_score * 0.30
+        + review_score * 0.20
+        + span_score * 0.20
+    )
 
     return collaboration_score
 
@@ -684,23 +1070,110 @@ def calculate_collaboration_raw(stats: AuthorStats, shared_files_pct: float) -> 
 # ============================================================================
 
 
+def is_bugfix_commit(message: str) -> bool:
+    """
+    Detect if a commit is a bug fix based on commit message patterns.
+
+    Args:
+        message: Commit message text
+
+    Returns:
+        True if commit appears to be a bug fix
+    """
+    message_lower = message.lower()
+    bugfix_patterns = [
+        "fix",
+        "bug",
+        "issue #",
+        "issues #",
+        "#",
+        "hotfix",
+        "patch",
+        "resolve",
+        "closes #",
+        "close #",
+        "fixes #",
+        "fixed #",
+        "repair",
+        "correct",
+        "defect",
+    ]
+    return any(pattern in message_lower for pattern in bugfix_patterns)
+
+
+def extract_review_credits(
+    message: str, author_email: str, stats_dict: Dict[str, AuthorStats]
+) -> None:
+    """
+    Extract code review participation from commit message trailers.
+
+    Args:
+        message: Commit message text
+        author_email: Primary commit author
+        stats_dict: Dictionary to update with review credits
+    """
+    # Parse trailers like "Reviewed-by: Name <email>"
+    review_patterns = [
+        r"Reviewed-by:\s*(?:[^<]*<)?([^>@\s]+@[^>\s]+)",
+        r"Co-authored-by:\s*(?:[^<]*<)?([^>@\s]+@[^>\s]+)",
+        r"Acked-by:\s*(?:[^<]*<)?([^>@\s]+@[^>\s]+)",
+    ]
+
+    for pattern in review_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE | re.MULTILINE)
+        for email in matches:
+            reviewer_email = normalize_author(email.strip())
+            if reviewer_email != author_email:
+                # Credit the reviewer
+                if reviewer_email not in stats_dict:
+                    stats_dict[reviewer_email] = AuthorStats()
+
+                if "co-authored-by" in pattern.lower():
+                    stats_dict[author_email].commits_coauthored += 1
+                    stats_dict[reviewer_email].commits_coauthored += 1
+                else:
+                    stats_dict[reviewer_email].reviews_given += 1
+
+
 def parse_commit_log(git_output: str, stats_dict: Dict[str, AuthorStats]) -> None:
     """
     Parse git log output with --numstat to extract commit and churn metrics.
+    Also detects bug fixes, code review participation, and categorizes files by type.
 
     Args:
-        git_output: Raw output from git log --numstat
+        git_output: Raw output from git log --numstat with full messages
         stats_dict: Dictionary to update with statistics
     """
     current_commit: Optional[Tuple[str, str, str, str]] = None
+    current_message: List[str] = []
+    in_message = False
 
     for line in git_output.splitlines():
+        # Check for commit message end marker
+        if line == "--END-COMMIT--":
+            # Process commit message
+            if current_commit and current_message:
+                full_message = "\n".join(current_message)
+                author_email = current_commit[2]
+
+                # Check for bug fix
+                if is_bugfix_commit(full_message):
+                    stats_dict[author_email].commits_bugfix += 1
+
+                # Extract review credits
+                extract_review_credits(full_message, author_email, stats_dict)
+
+            current_message = []
+            in_message = False
+            continue
+
         # Parse commit header line (hash, name, email, date)
         if line.count("\t") == 3:
+            # Start new commit
             sha, author_name, author_email, commit_date = line.split("\t")
             author_email = normalize_author(author_email)
-
             current_commit = (sha, author_name, author_email, commit_date)
+            in_message = True  # Start collecting message
 
             # Initialize stats for new authors
             if author_email not in stats_dict:
@@ -716,31 +1189,56 @@ def parse_commit_log(git_output: str, stats_dict: Dict[str, AuthorStats]) -> Non
             if not stats.commits_first_date:
                 stats.commits_first_date = commit_date
             stats.commits_last_date = commit_date
+            continue
 
         # Parse numstat line (additions, deletions, filename)
-        elif line and current_commit and line.count("\t") == 2:
+        if line and current_commit and line.count("\t") == 2 and not in_message:
             additions, deletions, filepath = line.split("\t")
             author_email = current_commit[2]
             stats = stats_dict[author_email]
+
+            # Categorize file
+            file_category = categorize_file(filepath)
 
             # Binary files show as "- -" in numstat
             if additions == "-" and deletions == "-":
                 stats.files_binary += 1
             else:
                 # Text files: count line changes
+                added_count = 0
+                deleted_count = 0
+
                 if additions != "-":
                     try:
-                        stats.lines_added += int(additions)
+                        added_count = int(additions)
+                        stats.lines_added += added_count
                     except ValueError:
                         pass
 
                 if deletions != "-":
                     try:
-                        stats.lines_deleted += int(deletions)
+                        deleted_count = int(deletions)
+                        stats.lines_deleted += deleted_count
                     except ValueError:
                         pass
 
+                # Track by file type
+                if file_category == "code":
+                    stats.lines_code_added += added_count
+                    stats.lines_code_deleted += deleted_count
+                elif file_category == "docs":
+                    stats.lines_docs_added += added_count
+                    stats.lines_docs_deleted += deleted_count
+                elif file_category == "config":
+                    stats.lines_config_added += added_count
+                    stats.lines_config_deleted += deleted_count
+
             stats.total_files_changed += 1
+            continue
+
+        # Collect commit message lines
+        if in_message:
+            current_message.append(line)
 
 
 def calculate_file_operations(
@@ -750,6 +1248,7 @@ def calculate_file_operations(
 ) -> None:
     """
     Calculate file operation types (added/deleted/modified) for each author.
+    Also categorizes files by type (code/docs/config).
 
     Args:
         common_args: Common git log arguments (refs, dates, pathspecs)
@@ -769,17 +1268,40 @@ def calculate_file_operations(
                 stats_dict[current_author] = AuthorStats()
         # Parse status lines (format: "A\tfilename" or "M\tfilename" or "D\tfilename")
         elif line and current_author and "\t" in line:
-            status = line.split("\t")[0].strip()
+            parts = line.split("\t")
+            status = parts[0].strip()
+            filepath = parts[1] if len(parts) > 1 else ""
             stats = stats_dict[current_author]
+
+            # Categorize file
+            file_category = categorize_file(filepath)
 
             # A = Added, M = Modified, D = Deleted
             # R = Renamed (count as modified), C = Copied (count as added)
             if status.startswith("A") or status.startswith("C"):
                 stats.files_added += 1
+                if file_category == "code":
+                    stats.files_code_added += 1
+                elif file_category == "docs":
+                    stats.files_docs_added += 1
+                elif file_category == "config":
+                    stats.files_config_added += 1
             elif status.startswith("D"):
                 stats.files_deleted += 1
+                if file_category == "code":
+                    stats.files_code_deleted += 1
+                elif file_category == "docs":
+                    stats.files_docs_deleted += 1
+                elif file_category == "config":
+                    stats.files_config_deleted += 1
             elif status.startswith("M") or status.startswith("R"):
                 stats.files_modified += 1
+                if file_category == "code":
+                    stats.files_code_modified += 1
+                elif file_category == "docs":
+                    stats.files_docs_modified += 1
+                elif file_category == "config":
+                    stats.files_config_modified += 1
 
 
 def calculate_merge_commits(
@@ -904,7 +1426,7 @@ def print_summary_report(data: List[Dict]) -> None:
         qual = float(dev["quality_score"])
         collab = float(dev["collab_score"])
 
-        print(f"{i:2d}. {dev['author']:40s} | Overall: {overall:.3f}")
+        print(f"{i:2d}. {dev['author_email']:40s} | Overall: {overall:.3f}")
         print(
             f"    Productivity: {prod:.3f} | Quality: {qual:.3f} | "
             f"Collaboration: {collab:.3f}"
@@ -917,11 +1439,20 @@ def analyze_dimension(data: List[Dict], dimension: str) -> None:
     print(f"\n{dimension.upper()} DIMENSION ANALYSIS:")
     print("=" * 80)
 
+    # Map dimension names to abbreviated field prefixes
+    dimension_map = {
+        "productivity": "prod",
+        "quality": "quality",
+        "collaboration": "collab",
+    }
+
+    prefix = dimension_map.get(dimension, dimension)
+
     fields = [
-        f"{dimension}_relative",
-        f"{dimension}_absolute",
-        f"{dimension}_statistical",
-        f"{dimension}_score",
+        f"{prefix}_rel",
+        f"{prefix}_abs",
+        f"{prefix}_stat",
+        f"{prefix}_score",
     ]
 
     for field_name in fields:
@@ -934,15 +1465,22 @@ def analyze_dimension(data: List[Dict], dimension: str) -> None:
         top = max(data, key=lambda x: float(x[field_name]))
 
         method = field_name.split("_")[-1].capitalize()
+        if method == "Rel":
+            method = "Relative"
+        elif method == "Abs":
+            method = "Absolute"
+        elif method == "Stat":
+            method = "Statistical"
+
         norm_method = f"{method:15s}"
         range_str = f"Range=[{min_val:.3f}, {max_val:.3f}]"
         print(f"\n{norm_method}: Avg={avg:.3f}, {range_str}")
-        print(f"  Top: {top['author']} ({float(top[field_name]):.3f})")
+        print(f"  Top: {top['author_email']} ({float(top[field_name]):.3f})")
 
 
 def compare_normalizations(data: List[Dict], author: str) -> None:
     """Compare normalization methods for a specific author."""
-    dev = next((d for d in data if d["author"] == author), None)
+    dev = next((d for d in data if d["author_email"] == author), None)
     if not dev:
         print(f"Author '{author}' not found")
         return
@@ -978,7 +1516,7 @@ def identify_strengths_weaknesses(data: List[Dict]) -> None:
     for name, field_key in dimensions:
         top = max(data, key=lambda x: float(x[field_key]))
         score = float(top[field_key])
-        print(f"\n{name:15s}: {top['author']:40s} ({score:.3f})")
+        print(f"\n{name:15s}: {top['author_email']:40s} ({score:.3f})")
 
 
 def generate_analysis_report(rows: List[Dict]) -> None:
@@ -996,7 +1534,7 @@ def generate_analysis_report(rows: List[Dict]) -> None:
 
     # Compare normalizations for first author
     if rows:
-        compare_normalizations(rows, rows[0]["author"])
+        compare_normalizations(rows, rows[0]["author_email"])
 
     print("\n" + "=" * 80)
     print("Analysis complete!")
@@ -1103,7 +1641,10 @@ def calculate_evaluation_indicators(
     """
     evaluation_indicators = {}
 
-    # Step 1: Calculate raw dimension scores for all authors
+    # Step 1: Calculate dynamic thresholds adapted to team context
+    dynamic_thresholds = calculate_dynamic_thresholds(stats_dict)
+
+    # Step 2: Calculate raw dimension scores for all authors
     productivity_raw = {}
     quality_raw = {}
     collaboration_raw = {}
@@ -1121,12 +1662,12 @@ def calculate_evaluation_indicators(
             stats, shared_files_pct
         )
 
-    # Step 2: Prepare lists for normalization
+    # Step 3: Prepare lists for normalization
     productivity_values = list(productivity_raw.values())
     quality_values = list(quality_raw.values())
     collaboration_values = list(collaboration_raw.values())
 
-    # Step 3: Calculate normalized scores for each author
+    # Step 4: Calculate normalized scores for each author
     for author_email, stats in stats_dict.items():
         # Get raw scores
         prod_raw = productivity_raw[author_email]
@@ -1137,12 +1678,12 @@ def calculate_evaluation_indicators(
         # Relative (min-max within team)
         productivity_relative = normalize_relative(prod_raw, productivity_values)
 
-        # Absolute (predefined thresholds)
-        # For productivity, we use a simplified threshold based on commits
+        # Absolute (dynamic thresholds adapted to team)
+        # Uses percentile-based thresholds instead of fixed values
         prod_absolute = normalize_absolute(
             stats.commits_non_merge,
-            PRODUCTIVITY_THRESHOLDS["commits_excellent"],
-            PRODUCTIVITY_THRESHOLDS["commits_poor"],
+            dynamic_thresholds["commits_excellent"],
+            dynamic_thresholds["commits_poor"],
             inverted=False,
         )
 
